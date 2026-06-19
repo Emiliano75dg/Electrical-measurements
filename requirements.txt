@@ -1,0 +1,20 @@
+# Runtime dependencies (mirror of pyproject.toml [project.dependencies]).
+# Preferred install:  pip install -e .          (adds the console script `elecmeas`)
+# This file is kept for `pip install -r requirements.txt` workflows.
+
+# GUI / plotting
+PySide6>=6.4.0
+pyqtgraph>=0.13.0
+numpy>=1.21.0
+
+# Keithley 7709 matrix SCPI transport (lazy import; real hardware only)
+pyvisa>=1.13.0
+
+# Test suite (dev)            — or: pip install -e ".[dev]"
+pytest>=7.0.0
+
+# Real Lake Shore M81-SSM hardware ONLY — or: pip install -e ".[hardware]"
+# NOT needed for simulation/tests/CI: the physics mock is vendored in
+# instruments/_vendor.  The real-hardware driver (M81Controller) still comes from
+# the sibling ../M81_electr_meas/src checkout, which must be present for hardware.
+# lakeshore>=1.5.0
