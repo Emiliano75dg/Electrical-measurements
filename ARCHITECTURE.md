@@ -1,4 +1,14 @@
-# ELECMEAS architecture (v2)
+# ELECMEAS Architecture — Current Implementation (v2)
+
+This document describes the **current, shipped architecture** of ELECMEAS:
+the modules, abstractions, data flow, and runtime behavior that exist in the
+repository today.
+
+If you need a different perspective:
+
+- See `docs/architecture.md` for the **target architecture / north star** we are
+  growing toward.
+- See `REDESIGN.md` for the **historical redesign rationale** behind v2.
 
 A **declarative, generic** model: typed channels (Protocols) + an acquisition
 engine that knows nothing about "Hall". Geometry, formulas and routing live in

@@ -11,6 +11,15 @@ built on top of this engine, not special cases in the code.
 A built-in simulation backend means no hardware is required for development and
 testing.
 
+## Documentation map
+
+- `ARCHITECTURE.md` — the **current implementation**: modules, runtime flow,
+  and the interfaces that exist today.
+- `docs/architecture.md` — the **target architecture**: the north-star design
+  and roadmap direction for upcoming work.
+- `REDESIGN.md` — the **historical v2 redesign document**: why the current
+  architecture ended up shaped this way.
+
 ---
 
 ## Requirements

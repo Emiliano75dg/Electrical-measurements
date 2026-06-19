@@ -82,4 +82,5 @@ spec `01`.
   optional reference.
 - Definition of done for each item: the change ships with tests and a working mock path.
 
-See `docs/architecture.md` for the full target design.
+See `ARCHITECTURE.md` for the current as-built architecture, and
+`docs/architecture.md` for the full target design.

@@ -1,4 +1,14 @@
-# Architecture
+# Architecture — Target Design
+
+This document describes the **intended future architecture** of the app: the
+target model, the missing layers, and the direction of travel for the roadmap.
+It is a **north-star design document**, not a description of what is already
+implemented in the repository.
+
+For adjacent views:
+
+- See `ARCHITECTURE.md` for the **current as-built implementation**.
+- See `REDESIGN.md` for the **completed v2 redesign record**.
 
 The target design for the configurable measurement app. This is the north star;
 `CLAUDE.md` holds the invariants, the `docs/specs/` files hold concrete work orders.
