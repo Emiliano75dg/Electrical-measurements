@@ -13,9 +13,12 @@ the gate leakage current. Depends on spec 01 (the registry and the `LabInstrumen
 
 Before writing anything, read and summarize:
 
-- `vdp-measure` — the SMU driver module (the B2902B SCPI command set), the socket /
-  transport layer, the Pydantic instrument config, and any mock/simulated path. Capture
-  exact class/method names and the actual SCPI command strings used.
+- `vdp-measure` (repo `vdp-measure`, cloned locally at `../Vdp/src/vdp_measure/` —
+  transport in `scpi.py`, B2902B command set in `instruments.py`, analogous to how
+  `m81.py` hooks `../M81_electr_meas/src`) — the SMU driver module (the B2902B SCPI command
+  set), the socket / transport layer, the Pydantic instrument config, and any
+  mock/simulated path. Capture exact class/method names and the actual SCPI command strings
+  used.
 - ELECMEAS — `core/channels.py` (the `SourceChannel` / `MeterChannel` Protocols this
   adapter implements), the `LabInstrument` Protocol and `Registry` from spec 01, how the
   `simulated` flag is plumbed, and **where the engine drives sources to a safe state
@@ -27,7 +30,8 @@ lifted. Resolve access before proceeding (see `CLAUDE.md`).
 
 ## What we are reusing
 
-`vdp-measure` already drives a B2902B over SCPI on a socket. **Lift that transport and
+`vdp-measure` already drives a B2902B over SCPI on a socket (repo `vdp-measure`, cloned in
+`../Vdp/src/vdp_measure/`: `scpi.py` + `instruments.py`). **Lift that transport and
 command logic; do not rewrite the SCPI.** The new work is wrapping it behind the spec-01
 seam (`LabInstrument` + the existing channel Protocols), plus three things vdp may not
 express in this form: current/voltage **compliance** as a safety limit, a **safe-disable**

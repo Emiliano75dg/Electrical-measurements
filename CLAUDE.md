@@ -19,7 +19,9 @@ inform the design and contain reusable, already-tested domain logic:
   control, safety interlocks, reciprocity as a first-class quantity.
 - `vdp-measure` — the earliest, narrowest attempt: van der Pauw, a Keysight B2902B SMU
   driven over SCPI/socket, and data-quality checks. Source of the first external-SMU
-  transport and the analysis discipline.
+  transport and the analysis discipline. Repo `vdp-measure` (github), cloned locally in
+  the sibling folder `../Vdp/` (package `src/vdp_measure/`) — repo name and on-disk folder
+  differ; do not rename the folder.
 
 ## Language & conventions
 
