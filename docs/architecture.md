@@ -56,22 +56,30 @@ The top and bottom layers are the work: the registry below, the sequencer above.
 A session holds a *set* of instruments, each declared by type + connection. Each
 instrument advertises the capabilities it offers and returns `None` for the rest:
 
-- `sources()` / `meters()` — the channels it provides (existing Protocols).
+- `make_source(port, cfg)` / `make_meter(port, cfg, id)` — **factories** that build the
+  channel Protocols on demand for a binding (channels are composed dynamically with
+  per-channel config, so there is no fixed channel list to enumerate); `None` when the
+  instrument provides no sources/meters.
 - `router()` — a routing capability (the 7709), or `None`.
-- `environment()` — an observe-only environment reader, or `None`.
+- `environment()` — an observe-only environment reader, or `None` (a stub for now).
 
 The current M81 facade becomes *one* entry in this registry. The 7709 becomes a routing
 capability. The gate is a *new* entry. This is the generalization that makes "add an
 instrument" a registry operation rather than an engine change. See
 `docs/specs/01-instrument-registry.md`.
 
-### Layer 2 — Channels / roles
+### Layer 2 — Channels (roles to come)
 
 Abstract sources and meters, decoupled from which instrument provides them. A channel is
-a `(instrument_id, port)` binding plus a semantic `role` tag (`excitation`, `gate`,
-`voltage`, `leakage`, ...). Everything downstream refers to a channel **by role**, never
-by instrument — this is what lets the same configuration work whether the gate lives on
-an M81 slot or on a separate SMU.
+an `(instrument_id, port)` binding (the `instrument_id` is optional and defaults to the
+synthesized M81, preserving single-instrument setups). The registry resolves the binding
+to a concrete Protocol via the owning instrument's factory.
+
+A semantic `role` tag (`excitation`, `gate`, `voltage`, `leakage`, ...) — so that
+everything downstream can refer to a channel **by role** rather than by instrument, e.g.
+the same configuration working whether the gate lives on an M81 slot or a separate SMU —
+is the **target**, but it is a *sequencer* concern with no consumer in the registry step.
+It arrives as an optional channel field with the executor tree (build order step 4).
 
 ### Layer 3 — Topology / routing
 
