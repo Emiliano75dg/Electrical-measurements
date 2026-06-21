@@ -6,8 +6,52 @@ the gate leakage current. Depends on spec 01 (the registry and the `LabInstrumen
 
 > **This spec was written from the `vdp-measure` README and the ELECMEAS
 > `ARCHITECTURE.md`, not from line-by-line source.** Class names, method names, and SCPI
-> strings below are the intended shape, to be reconciled against the actual code. Where
-> reality differs, follow the code and note the discrepancy — do not force the spec.
+> strings below were the intended shape; they have now been **reconciled against the
+> actual code** (see "Reconciliation notes"). Where the original sketch differed from
+> reality, this document follows the code.
+
+## Reconciliation notes (what the code actually shows)
+
+Reconnaissance against `../Vdp/src/vdp_measure/` and the ELECMEAS step-1 seam established:
+
+1. **The transport is already behind a Protocol with a separate dry-run** — there is no
+   `ScpiSocket` to build. `scpi.py` already provides `Transport` (Protocol:
+   `write`/`query`/`close`), `SocketTransport` (real raw socket, retry + backoff), and
+   `DryRunTransport` (mock: logs commands, remembers state, answers via
+   `_default_response`). We **lift this triad**; the `simulated` flag is the *choice*
+   between constructing `SocketTransport` vs `DryRunTransport`, not an attribute of one
+   class.
+2. **vdp drives the B2902B the opposite way to our case.** vdp does *source I / measure V*
+   (`configure_current_source`, voltage compliance). Our gate+leakage case is *source V /
+   measure I*. The SCPI subsystems are symmetric, but **`configure_voltage_source` does
+   not exist in vdp** — that inverse command path is the one piece of new B2902B logic to
+   add, mirroring the existing one. The transport is **not** rewritten.
+3. **Raw socket, not pyvisa.** vdp uses `host` + `port` (default 5025), no VISA resource
+   string. The session `InstrumentSpec` already carries `resource` + `simulated`; the host
+   (optionally `host:port`) goes in `resource`. **No new schema fields, no schema-version
+   bump** — the v2 `instruments` block + per-channel `instrument_id` already accommodate a
+   new `type`.
+4. **`safe_disable` is per-source-channel, not per-instrument.** The engine only knows the
+   `SourceChannel` Protocol (`enable()`/`disable()`); it has no per-instrument hook. So the
+   B2902B's safe-disable *is* its `SourceChannel.disable()` (output off). A
+   `LabInstrument.safe_disable()` would be dead weight the engine never calls — dropped, to
+   keep the engine instrument-agnostic (invariant 1).
+5. **The interlock hook does not yet exist.** `engine._route()` does `open_all()` →
+   `close(channels)` only; it never disables sources before a relay switch nor re-enables
+   after (sources are disabled only in run() teardown). Invariant 5 is therefore *not*
+   enforced during routing. Establishing the minimal hook (disable → open → switch →
+   re-enable, channel-level on `SourceChannel`) is in scope here and touches the **shared**
+   engine path used by M81/vdP runs — broader than the adapter alone, applied to all
+   sources so it stays instrument-agnostic.
+6. **A `build_instrument(spec)` factory is missing.** The GUI assembles the registry by
+   hand from live facades and ignores `session.instruments`. For "B2902B declared in a
+   Session and resolved by the registry" we add a small `InstrumentSpec -> LabInstrument`
+   factory (type → entry). Full GUI rewiring to auto-connect file-declared instruments is
+   the larger integration and is a follow-up; this step proves the path via the factory +
+   a headless/mock run.
+7. **Mock parity uses `DryRunTransport`.** Its state memory only tracks `:SOUR:CURR`; we
+   extend the lifted copy to also remember `:SOUR:VOLT` and answer `MEAS:CURR` with an
+   Ohmic leakage `V/R` (symmetric, kept transport-generic, deterministic for tests).
 
 ## Reconnaissance (read first)
 
@@ -39,38 +83,43 @@ path tied to the interlock, and **mock parity** with ELECMEAS's simulated mode.
 
 ## Target design
 
-Keep three concerns separate (reconcile with how vdp layers them):
+Three concerns stay separate, mapped onto what the code already provides:
 
-1. **Transport** — a reusable raw-socket SCPI client: `write` / `query`, timeouts,
-   termination, `*OPC?` sync. Not B2902B-specific.
-2. **Instrument logic** — the B2902B command set: set source mode (V/I) + compliance, set
-   measure (V/I/R, range, NPLC, averaging), read, output on/off.
-3. **Protocol wrapper** — a `B2902BInstrument` implementing `LabInstrument`, exposing its
-   channels as `SourceChannel` / `MeterChannel`.
+1. **Transport** — the **lifted** `Transport` / `SocketTransport` / `DryRunTransport`
+   triad from `vdp_measure.scpi` (raw socket, `write` / `query` / `close`). Not
+   B2902B-specific; ready for a sibling SMU (e.g. Keithley).
+2. **Instrument logic** — the B2902B command set, lifted from `vdp_measure.instruments`
+   and **extended** with the source-V / measure-I path (`configure_voltage_source` +
+   current measure): set source mode (V/I) + compliance, set measure (NPLC; auto-range),
+   read, output on/off.
+3. **Protocol wrapper** — a `B2902BLabInstrument` implementing `LabInstrument` (spec 01),
+   whose `make_source` / `make_meter` factories build `B2902BSource` / `B2902BMeter`
+   exposing the channel as `SourceChannel` / `MeterChannel`.
 
 ```python
-# Illustrative -- reconcile against vdp-measure's driver and core/channels.py.
+# Reconciled against vdp_measure (scpi.py / instruments.py) and core/channels.py.
 
-class ScpiSocket:
-    """Reusable raw-socket SCPI transport (write / query, timeout, *OPC? sync)."""
-    def __init__(self, host: str, port: int = 5025, *, simulated: bool = False) -> None: ...
-    def write(self, cmd: str) -> None: ...
-    def query(self, cmd: str) -> str: ...
+# Transport: lifted as-is into instruments/scpi.py (not rewritten).
+class Transport(Protocol):
+    def write(self, command: str) -> None: ...
+    def query(self, command: str) -> str: ...
     def close(self) -> None: ...
+# SocketTransport(host, port=5025, ...) for hardware; DryRunTransport(name) for mock.
 
-class B2902BInstrument:                # implements LabInstrument (spec 01)
+class B2902BLabInstrument:              # implements LabInstrument (spec 01)
     id: str
-    def connect(self, *, simulated: bool) -> None: ...
-    def disconnect(self) -> None: ...
-    def sources(self) -> list[SourceChannel]: ...   # channels declared as sources
-    def meters(self) -> list[MeterChannel]: ...     # channels declared as meters
-    def router(self) -> None: ...                   # an SMU has no routing
-    def environment(self) -> None: ...              # and no environment
-    def safe_disable(self) -> None: ...             # outputs off / 0 V -- before relay switching
+    type: str                          # "keysight_b2902b"
+    def connect(self) -> None: ...
+    def disconnect(self) -> None: ...   # fail-safe: outputs off
+    def make_source(self, port: int, cfg: SourceConfig) -> SourceChannel: ...
+    def make_meter(self, port, cfg, meter_id) -> MeterChannel: ...   # same port → source+meter
+    def router(self) -> None: ...       # an SMU has no routing
+    def environment(self) -> None: ...  # and no environment
 ```
 
-Whether `safe_disable` belongs on `LabInstrument` or on each `SourceChannel` must match
-how spec 01 / the engine expresses the interlock. Reconcile.
+`safe_disable` lives on the **source channel**: `B2902BSource.disable()` turns the output
+off (the safe state). The engine already drives `SourceChannel.disable()` — so the SMU
+participates in the interlock with no per-instrument method. (See Reconciliation note 4.)
 
 ### One channel can be source and meter at once
 
@@ -82,28 +131,34 @@ time without conflicting SCPI state.
 
 ## Connection & config (Session)
 
-```yaml
-instruments:
-  - id: gate_smu
-    type: keysight_b2902b
-    connection: { host: "192.168.0.5", port: 5025, simulated: false }
-    # or a VISA resource string if vdp uses pyvisa rather than raw sockets:
-    # connection: { resource: "TCPIP0::192.168.0.5::inst0::INSTR", simulated: false }
-channels:
-  sources:
-    - id: gate
-      role: gate
-      bind: { instrument: gate_smu, port: ch1 }
-      source: { function: voltage, compliance_a: 1.0e-6 }   # current compliance = safety limit
-  meters:
-    - id: gate_leak
-      role: leakage
-      bind: { instrument: gate_smu, port: ch1 }             # SAME channel: source V, measure I
-      measure: { function: current, range: auto, nplc: 1.0 }
+The real schema (step-1 v2) is JSON with an `instruments` block plus `sources`/`meters`
+carrying typed `SourceConfig`/`MeterConfig` and an optional `instrument_id` binding. The
+B2902B is a raw socket, so its host goes in `resource` (port defaults to 5025; an explicit
+`host:port` is accepted). The channel number (1/2) is the `port`. No new schema fields.
+
+```jsonc
+{
+  "schema_version": 2,
+  "instruments": [
+    { "id": "gate_smu", "type": "keysight_b2902b",
+      "connection": { "resource": "192.168.0.5", "simulated": false } }
+  ],
+  "sources": [
+    // gate: source V_DC on channel 1; compliance = current safety limit (A)
+    { "port": 1, "instrument_id": "gate_smu",
+      "config": { "func": "V_DC", "amplitude": 0.0, "compliance": 1.0e-6 } }
+  ],
+  "meters": [
+    // leakage: SAME channel 1, measure I; reuses the existing nplc field, auto-range
+    { "port": 1, "meter_id": "gate_leak", "instrument_id": "gate_smu",
+      "config": { "lockin": false, "nplc": 1.0 } }
+  ]
+}
 ```
 
-Field names are illustrative — align with the existing readout-spec fields in ELECMEAS
-where they already exist; add new fields only where missing.
+This reuses existing fields: `SourceConfig.func` (`V_DC`) / `amplitude` (the gate setpoint,
+V) / `compliance` (A); `MeterConfig.nplc`. `range` / `averaging` are **not** existing
+fields — the adapter uses auto-range and does not add them this step.
 
 ## Compliance & safety
 
@@ -111,10 +166,11 @@ where they already exist; add new fields only where missing.
   **voltage compliance**. Treat compliance as a mandatory source parameter (a safety
   limit), not optional.
 - The SMU is a source, so it participates in the interlock invariant: before any 7709
-  relay switch, drive outputs off / to 0 via `safe_disable`. Plug into the same hook the
-  engine uses for M81 sources. If no such hook exists yet, establishing a minimal one is
-  in scope here — an SMU sourcing into switching relays is a real hazard, and this may be
-  broader than the adapter alone.
+  relay switch, drive outputs off via the source channel's `disable()`. **No such hook
+  exists yet** — `engine._route()` opens/closes relays without disabling sources (see
+  Reconciliation note 5). Establishing the minimal one (disable all sources → open → close
+  → re-enable, channel-level so it stays instrument-agnostic) is in scope here and applies
+  to every source, including the existing M81 path — broader than the adapter alone.
 - On disconnect or error, fail safe (output off).
 
 ## Mock mode
@@ -125,19 +181,21 @@ small function of applied V plus noise — so the `simulated` flag from
 
 ## Migration (ordered)
 
-1. Reconnaissance (above).
-2. Lift vdp's transport into a reusable `ScpiSocket` (or reconcile with what exists);
-   keep its B2902B command logic.
-3. Implement `B2902BInstrument` as a `LabInstrument`, exposing channels as
-   `SourceChannel` / `MeterChannel`, supporting source + meter on one channel.
-4. Wire compliance as a mandatory source parameter; implement `safe_disable` and connect
-   it to the interlock hook.
-5. Register `type: keysight_b2902b` in the registry's instrument factory; extend the
-   Session schema (`source` / `measure` blocks) only where those fields are not already
-   present.
-6. Provide the simulated transport for mock mode.
-7. Minimal validation: a preset/sequence that holds a fixed gate voltage and reads
-   leakage, in mock (and against hardware if available).
+1. Reconnaissance (done — see Reconciliation notes).
+2. Lift vdp's transport triad (`Transport` / `SocketTransport` / `DryRunTransport`) into
+   `instruments/scpi.py`; keep the B2902B command logic, adding the source-V / measure-I
+   path.
+3. Implement `B2902BLabInstrument` as a `LabInstrument` with `make_source` / `make_meter`
+   factories building `B2902BSource` / `B2902BMeter`, supporting source + meter on one
+   channel (no SCPI state conflict).
+4. Wire compliance as a mandatory source parameter; `B2902BSource.disable()` is the
+   safe-disable; add the minimal interlock ordering to `engine._route()`.
+5. Add the `type: keysight_b2902b` tag (`core.session`) and a `build_instrument(spec)`
+   factory in the registry. **No Session schema-version bump** — existing v2 fields suffice.
+6. Extend the lifted `DryRunTransport` for mock leakage (V→I), so `simulated=True` works
+   end-to-end.
+7. Minimal validation: a fixed gate voltage + leakage read, in mock (and against hardware
+   if available).
 
 ## Non-goals (this step)
 
@@ -162,14 +220,16 @@ small function of applied V plus noise — so the `simulated` flag from
   applied; safe-disable; registry resolution of the same-channel source + meter binding;
   B2902B-as-registry-entry alongside the M81.
 
-## Open questions (confirm against source)
+## Open questions — resolved against source
 
-- Does vdp separate socket transport from SCPI-command logic, or combine them? (Determines
-  how cleanly it lifts.)
-- Raw `host` + `port` socket vs a pyvisa `TCPIP` resource string? Match vdp's approach.
-- Where does the engine drive sources to a safe state before routing (the interlock hook
-  from spec 01), and is `safe_disable` per-instrument or per-source-channel?
-- Are `range` / `nplc` / `averaging` already fields on the existing `MeterChannel` readout
-  spec, or new ones to add?
-- Single-channel (gate only) or dual-channel use in practice? (Affects default channels
-  exposed — but design for both.)
+- **Separate transport vs combined?** Separate: `scpi.py` (transport, behind `Transport`
+  Protocol) and `instruments.py` (B2902B command logic) are distinct. Lifts cleanly.
+- **Raw socket vs pyvisa?** Raw `host` + `port` (5025). No pyvisa for the SMU. Host goes in
+  `InstrumentSpec.resource`.
+- **Interlock hook / per-instrument vs per-channel?** No hook exists; we add it in
+  `engine._route()`. Safe-disable is **per-source-channel** (`SourceChannel.disable()`) —
+  the only seam the engine uses.
+- **`range` / `nplc` / `averaging` existing fields?** Only `nplc` exists (`MeterConfig`).
+  `range`/`averaging` are not added; the adapter auto-ranges.
+- **Single vs dual channel?** Design for both: channel = `port` (1/2). The canonical case
+  is one channel as source+meter (gate+leakage); a second channel is just another binding.
