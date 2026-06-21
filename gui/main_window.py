@@ -38,17 +38,25 @@ from PySide6.QtWidgets import (
 from core.derived import Geometry, vanderpauw_sheet
 from core.session import (
     ConnectionSettings,
+    DEFAULT_M81_ID,
+    DEFAULT_MATRIX_ID,
     MatrixSettings,
     MeterSpec,
     Session,
     SourceSpec,
     load_session,
     save_session,
+    synthesize_default_instruments,
 )
+from core.channels import MeterChannel, SourceChannel
 from core.validation import validate_configuration
 from instruments.m81 import M81Instrument
-from instruments.m81_channels import M81Meter, M81SMUMeter, M81Source
 from instruments.matrix7709 import Matrix7709
+from instruments.registry import (
+    Keithley7709LabInstrument,
+    M81LabInstrument,
+    Registry,
+)
 from measurements.engine import AcquisitionWorker
 from gui.channels_tab import ChannelsPanel
 from gui.config_panel import ConnectionPanel, MockPanel
@@ -267,14 +275,30 @@ class MainWindow(QMainWindow):
 
     # ── channel construction ──────────────────────────────────────────────────────
 
-    def _build_channels(self) -> tuple[list[M81Source], list[M81Meter]]:
+    def _build_registry(self) -> Registry:
+        """Assemble the instrument registry from the live facades.
+
+        The GUI does not yet expose a per-channel instrument selector, so every
+        channel binds to the default M81 (multi-instrument config is file-driven
+        this step).  The registry wraps the same live ``M81Instrument`` /
+        ``Matrix7709`` the connect flow created — no behaviour change.
+        """
+        registry = Registry()
+        registry.add(M81LabInstrument(self._instrument, instrument_id=DEFAULT_M81_ID))
+        if self._matrix is not None:
+            registry.add(
+                Keithley7709LabInstrument(self._matrix, instrument_id=DEFAULT_MATRIX_ID)
+            )
+        return registry
+
+    def _build_channels(self) -> tuple[list[SourceChannel], list[MeterChannel]]:
+        registry = self._build_registry()
         sources = [
-            M81Source(self._instrument, port, cfg)
+            registry.resolve_source(None, port, cfg)
             for port, cfg in self._channels.source_specs()
         ]
         meters = [
-            M81SMUMeter(self._instrument, port, cfg, meter_id=mid) if cfg.smu
-            else M81Meter(self._instrument, port, cfg, meter_id=mid)
+            registry.resolve_meter(None, port, cfg, mid)
             for port, cfg, mid in self._channels.meter_specs()
         ]
         return sources, meters
@@ -394,11 +418,23 @@ class MainWindow(QMainWindow):
 
     def _capture_session(self) -> Session:
         """Snapshot the full setup from the panels into a serialisable Session."""
+        connection = ConnectionSettings(
+            ip_address=self._connection.ip_address,
+            simulated=self._connection.simulated,
+        )
+        matrix = MatrixSettings(
+            enabled=self._routing.matrix_enabled,
+            resource=self._routing.matrix_resource,
+            simulated=self._routing.matrix_simulated,
+            settle_s=self._routing.matrix_settle_s,
+            vdp_sheet=self._routing.vdp_sheet_enabled,
+        )
         return Session(
-            connection=ConnectionSettings(
-                ip_address=self._connection.ip_address,
-                simulated=self._connection.simulated,
-            ),
+            connection=connection,
+            # GUI channels bind to the default M81 (no per-channel selector yet),
+            # so the captured registry is the synthesized default — recorded so
+            # saved files are self-describing v2 sessions.
+            instruments=synthesize_default_instruments(connection, matrix),
             sources=[SourceSpec(port, cfg) for port, cfg in self._channels.source_specs()],
             meters=[MeterSpec(port, mid, cfg) for port, cfg, mid in self._channels.meter_specs()],
             derived_mode=self._channels.derived_mode,
@@ -406,13 +442,7 @@ class MainWindow(QMainWindow):
             settle_s=self._channels.settle_s,
             interval_s=self._channels.interval_s,
             current_reversal=self._channels.current_reversal,
-            matrix=MatrixSettings(
-                enabled=self._routing.matrix_enabled,
-                resource=self._routing.matrix_resource,
-                simulated=self._routing.matrix_simulated,
-                settle_s=self._routing.matrix_settle_s,
-                vdp_sheet=self._routing.vdp_sheet_enabled,
-            ),
+            matrix=matrix,
             layout=self._routing.layout(),
             routes=self._routing.routes(),
         )

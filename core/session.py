@@ -14,6 +14,11 @@ before an acquisition starts.
 The schema is versioned (SCHEMA_VERSION).  Matrix layout and route steps are
 part of the model (added in Phase 4 without a version bump — older files simply
 lack those keys and load with defaults).
+
+v2 (roadmap step 1) adds the instrument registry: an ``instruments`` block and an
+optional per-channel ``instrument_id`` binding.  v1 files (no ``instruments``)
+load by synthesizing a default registry — an M81 from ``connection`` plus the
+7709 if the matrix is enabled — so existing sessions keep working unchanged.
 """
 
 from __future__ import annotations
@@ -26,7 +31,18 @@ from core.channels import Func, MeterConfig, SourceConfig
 from core.derived import Geometry
 from measurements.routing import MatrixLayout, RouteStep
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Serialization vocabulary for the instrument registry (v2).  Kept here, in the
+# pure-domain session module, because these strings are part of the saved file
+# format; the instruments layer (instruments/registry.py) imports them.
+TYPE_M81 = "lakeshore_m81"
+TYPE_KEITHLEY_7709 = "keithley_7709"
+
+# Default binding for channels that do not name an instrument, and the id of the
+# M81 synthesized when loading a pre-registry (v1) file.
+DEFAULT_M81_ID = "m81_main"
+DEFAULT_MATRIX_ID = "matrix"
 
 
 @dataclass
@@ -45,9 +61,20 @@ class MatrixSettings:
 
 
 @dataclass
+class InstrumentSpec:
+    """One registry entry: an instrument declared by id, type and connection."""
+
+    id: str
+    type: str
+    resource: str = ""
+    simulated: bool = True
+
+
+@dataclass
 class SourceSpec:
     port: int
     config: SourceConfig
+    instrument_id: str | None = None   # None -> the default (synthesized) M81
 
 
 @dataclass
@@ -55,6 +82,7 @@ class MeterSpec:
     port: int
     meter_id: str
     config: MeterConfig
+    instrument_id: str | None = None   # None -> the default (synthesized) M81
 
 
 @dataclass
@@ -62,6 +90,7 @@ class Session:
     """The complete, serialisable measurement setup."""
 
     connection: ConnectionSettings = field(default_factory=ConnectionSettings)
+    instruments: list[InstrumentSpec] = field(default_factory=list)
     sources: list[SourceSpec] = field(default_factory=list)
     meters: list[MeterSpec] = field(default_factory=list)
     derived_mode: str = "Hall preset (Rxx, Rxy, ρ)"
@@ -79,12 +108,26 @@ class Session:
         return {
             "schema_version": SCHEMA_VERSION,
             "connection": asdict(self.connection),
+            "instruments": [
+                {
+                    "id": inst.id,
+                    "type": inst.type,
+                    "connection": {"resource": inst.resource, "simulated": inst.simulated},
+                }
+                for inst in self.instruments
+            ],
             "sources": [
-                {"port": s.port, "config": _source_cfg_to_dict(s.config)}
+                _with_instrument_id(
+                    {"port": s.port, "config": _source_cfg_to_dict(s.config)},
+                    s.instrument_id,
+                )
                 for s in self.sources
             ],
             "meters": [
-                {"port": m.port, "meter_id": m.meter_id, "config": asdict(m.config)}
+                _with_instrument_id(
+                    {"port": m.port, "meter_id": m.meter_id, "config": asdict(m.config)},
+                    m.instrument_id,
+                )
                 for m in self.meters
             ],
             "derived_mode": self.derived_mode,
@@ -111,7 +154,11 @@ class Session:
             simulated=conn.get("simulated", ConnectionSettings.simulated),
         )
         sources = [
-            SourceSpec(port=int(s["port"]), config=_source_cfg_from_dict(s.get("config", {})))
+            SourceSpec(
+                port=int(s["port"]),
+                config=_source_cfg_from_dict(s.get("config", {})),
+                instrument_id=s.get("instrument_id"),
+            )
             for s in d.get("sources", [])
         ]
         meters = [
@@ -119,6 +166,7 @@ class Session:
                 port=int(m["port"]),
                 meter_id=m.get("meter_id", f"M{m['port']}"),
                 config=_meter_cfg_from_dict(m.get("config", {})),
+                instrument_id=m.get("instrument_id"),
             )
             for m in d.get("meters", [])
         ]
@@ -148,9 +196,11 @@ class Session:
             )
             for i, r in enumerate(d.get("routes", []))
         ]
+        instruments = _instruments_from_dict(d, connection, matrix)
         defaults = cls()
         return cls(
             connection=connection,
+            instruments=instruments,
             sources=sources,
             meters=meters,
             derived_mode=d.get("derived_mode", defaults.derived_mode),
@@ -162,6 +212,80 @@ class Session:
             layout=layout,
             routes=routes,
         )
+
+
+# ── registry (de)serialisation helpers ───────────────────────────────────────
+
+def _with_instrument_id(d: dict, instrument_id: str | None) -> dict:
+    """Add ``instrument_id`` to a channel dict only when it is bound explicitly.
+
+    Keeps default-bound channels byte-for-byte as before, so unchanged GUI
+    setups serialise identically apart from the new top-level ``instruments``.
+    """
+    if instrument_id is not None:
+        d["instrument_id"] = instrument_id
+    return d
+
+
+def _instruments_from_dict(
+    d: dict, connection: "ConnectionSettings", matrix: "MatrixSettings"
+) -> list["InstrumentSpec"]:
+    """Resolve the registry from a session dict.
+
+    Three cases:
+      * an ``instruments`` block present (v2) → parse it verbatim;
+      * a non-empty file without one (v1) → migrate by synthesizing the default
+        registry (M81 from ``connection`` + 7709 if the matrix is enabled), under
+        the ids the registry and unbound channels default to;
+      * an empty dict (pure defaults holder, e.g. ``from_dict({})``) → no
+        instruments, preserving ``from_dict({}) == Session()``.
+    """
+    raw = d.get("instruments")
+    if raw is not None:
+        out: list[InstrumentSpec] = []
+        for entry in raw:
+            conn = entry.get("connection", {})
+            out.append(
+                InstrumentSpec(
+                    id=entry["id"],
+                    type=entry.get("type", TYPE_M81),
+                    resource=conn.get("resource", ""),
+                    simulated=conn.get("simulated", True),
+                )
+            )
+        return out
+
+    if not d:
+        return []
+    return synthesize_default_instruments(connection, matrix)
+
+
+def synthesize_default_instruments(
+    connection: "ConnectionSettings", matrix: "MatrixSettings"
+) -> list["InstrumentSpec"]:
+    """The default registry for a single-M81 setup: the M81, plus the 7709 if on.
+
+    Used both to migrate v1 files on load and by the GUI to populate a captured
+    session's ``instruments`` block, so saved files are self-describing.
+    """
+    synthesized = [
+        InstrumentSpec(
+            id=DEFAULT_M81_ID,
+            type=TYPE_M81,
+            resource=connection.ip_address,
+            simulated=connection.simulated,
+        )
+    ]
+    if matrix.enabled:
+        synthesized.append(
+            InstrumentSpec(
+                id=DEFAULT_MATRIX_ID,
+                type=TYPE_KEITHLEY_7709,
+                resource=matrix.resource,
+                simulated=matrix.simulated,
+            )
+        )
+    return synthesized
 
 
 # ── config (de)serialisation helpers ─────────────────────────────────────────

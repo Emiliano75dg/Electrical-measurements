@@ -269,6 +269,25 @@ Run with `python -m pytest`.
   automatically.
 - **New geometry/route:** add a `(layout, steps)` preset in `routing.py` and a
   button in `RoutingPanel`.
-- **New instrument:** implement the `SourceChannel` / `MeterChannel` Protocols;
-  the engine and the GUI are unchanged.
-```
+- **New instrument:** implement the `LabInstrument` Protocol in
+  `instruments/registry.py` (capability factories `make_source` / `make_meter`
+  returning the existing `SourceChannel` / `MeterChannel` Protocols, plus
+  `router()` / `environment()`), declare it in the session's `instruments` block,
+  and bind channels to it via `instrument_id`. The engine and the GUI are unchanged.
+
+---
+
+## `instruments/registry.py` — instrument registry (schema v2)
+
+A `Registry` holds the session's `LabInstrument` entries and resolves a channel
+binding `(instrument_id, port, cfg)` to a concrete Protocol via the owning
+instrument's **factory** — channels are composed dynamically with per-channel
+config, so capabilities are factories (`make_source` / `make_meter`), not static
+lists. A `None` `instrument_id` falls back to the default M81 (`DEFAULT_M81_ID`),
+so single-instrument setups and the GUI (no per-channel selector yet) are
+unchanged. `M81LabInstrument` reproduces the old `_build_channels` selection
+(lock-in / DC `M81Meter` vs `M81SMUMeter`); `Keithley7709LabInstrument` exposes
+the matrix via `router()` only; `environment()` is a `None` stub this step. The
+session schema is **v2**: an `instruments` block + optional per-channel
+`instrument_id`; v1 files load by synthesizing the default registry
+(`synthesize_default_instruments`), so older sessions keep working.

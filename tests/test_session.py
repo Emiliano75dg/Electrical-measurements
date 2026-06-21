@@ -7,8 +7,13 @@ import pytest
 from core.channels import Func, MeterConfig, SourceConfig
 from core.derived import Geometry
 from core.session import (
+    DEFAULT_M81_ID,
+    DEFAULT_MATRIX_ID,
     SCHEMA_VERSION,
+    TYPE_KEITHLEY_7709,
+    TYPE_M81,
     ConnectionSettings,
+    InstrumentSpec,
     MatrixSettings,
     MeterSpec,
     Session,
@@ -96,3 +101,77 @@ def test_from_dict_tolerates_missing_matrix_keys():
 def test_from_dict_empty_uses_defaults():
     s = Session.from_dict({})
     assert s == Session()
+
+
+# ── v2 instrument registry: round-trip and v1 migration ──────────────────────
+
+def test_v2_round_trip_preserves_instruments_and_bindings():
+    s = _full_session()
+    s.instruments = [
+        InstrumentSpec(id="m81_main", type=TYPE_M81, resource="10.0.0.5", simulated=False),
+        InstrumentSpec(id="gate_smu", type="keysight_b2902b",
+                       resource="TCPIP0::192.168.0.5::INSTR", simulated=False),
+    ]
+    s.sources[0].instrument_id = "gate_smu"
+    restored = Session.from_dict(s.to_dict())
+    assert restored == s
+    assert restored.sources[0].instrument_id == "gate_smu"
+    assert [i.id for i in restored.instruments] == ["m81_main", "gate_smu"]
+
+
+def test_schema_version_is_two():
+    assert SCHEMA_VERSION == 2
+
+
+def test_unbound_channel_omits_instrument_id_in_json():
+    # a channel left on the default M81 serialises exactly as before (no key)
+    data = _full_session().to_dict()
+    assert "instrument_id" not in data["sources"][0]
+    assert "instrument_id" not in data["meters"][0]
+
+
+def test_v1_load_synthesizes_default_m81():
+    legacy = {
+        "schema_version": 1,
+        "connection": {"ip_address": "1.2.3.4", "simulated": True},
+        "sources": [{"port": 1, "config": {"func": "I_AC", "amplitude": 1e-6}}],
+        "meters": [{"port": 1, "meter_id": "V", "config": {"lockin": True}}],
+    }
+    s = Session.from_dict(legacy)
+    assert [i.id for i in s.instruments] == [DEFAULT_M81_ID]
+    m81 = s.instruments[0]
+    assert m81.type == TYPE_M81
+    assert m81.resource == "1.2.3.4"
+    assert m81.simulated is True
+    assert s.sources[0].instrument_id is None   # unbound -> default M81
+
+
+def test_v1_load_with_matrix_also_synthesizes_7709():
+    legacy = {
+        "schema_version": 1,
+        "connection": {"ip_address": "1.2.3.4", "simulated": False},
+        "matrix": {"enabled": True, "resource": "GPIB0::7", "simulated": False},
+        "sources": [{"port": 1, "config": {"func": "I_AC"}}],
+        "meters": [{"port": 1, "meter_id": "V", "config": {}}],
+    }
+    s = Session.from_dict(legacy)
+    assert [i.id for i in s.instruments] == [DEFAULT_M81_ID, DEFAULT_MATRIX_ID]
+    matrix = s.instruments[1]
+    assert matrix.type == TYPE_KEITHLEY_7709
+    assert matrix.resource == "GPIB0::7"
+    assert matrix.simulated is False
+
+
+def test_v1_file_load_via_save_path(tmp_path):
+    # the public loader (not just from_dict) migrates a v1 file on disk
+    legacy = {
+        "schema_version": 1,
+        "connection": {"ip_address": "9.9.9.9", "simulated": True},
+        "sources": [{"port": 1, "config": {"func": "I_AC"}}],
+        "meters": [{"port": 1, "meter_id": "V", "config": {"lockin": True}}],
+    }
+    path = tmp_path / "v1.json"
+    path.write_text(json.dumps(legacy))
+    s = load_session(path)
+    assert [i.id for i in s.instruments] == [DEFAULT_M81_ID]
+    assert s.instruments[0].resource == "9.9.9.9"
