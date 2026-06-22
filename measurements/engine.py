@@ -256,8 +256,27 @@ class AcquisitionWorker(QThread):
         if self._matrix is None or self._layout is None:
             return
         channels = step.channels(self._layout)
+        # Safety interlock (CLAUDE.md invariant 5): relays never move with sources
+        # live.  Disable every source *before* open_all, switch, then re-enable
+        # once the new step's relays are closed.  Instrument-agnostic — the engine
+        # only knows the SourceChannel Protocol, not what an SMU is, so a failed
+        # disable propagates and aborts the run before any relay moves.
+        #
+        # ASSUMPTION: every source in self._sources is routed through the matrix,
+        # so disabling all of them before switching is correct.  REVISIT at the
+        # executor-tree (step 4): a directly-wired / non-routed source (e.g. a gate
+        # that does not pass through the 7709) must NOT be cycled here — no relay
+        # moves on its path, and zeroing it each step would change the sample state
+        # between measurements (gate yo-yo).  The failure mode of this deferral is
+        # functional, not a safety violation: over-disabling is always safe.
+        for s in self._sources:
+            s.disable()
         self._matrix.open_all()
         self._matrix.close(channels)
+        for s in self._sources:
+            s.enable()
+        # Settle after re-enable: let the new path (relays + re-driven sources)
+        # stabilise — same mechanism as the initial settle.
         settle = getattr(self._matrix, "settle_s", 0.0)
         if settle and settle > 0:
             self.msleep(int(settle * 1000))
