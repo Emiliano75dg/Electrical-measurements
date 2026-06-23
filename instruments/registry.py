@@ -30,7 +30,14 @@ from typing import Protocol, runtime_checkable
 from core.channels import MeterChannel, MeterConfig, SourceChannel, SourceConfig
 # The serialization vocabulary (type tags, default ids) lives in the pure-domain
 # session module; the registry is the higher instruments layer and imports it.
-from core.session import DEFAULT_M81_ID, TYPE_KEITHLEY_7709, TYPE_M81
+from core.session import (
+    DEFAULT_M81_ID,
+    TYPE_KEITHLEY_7709,
+    TYPE_KEYSIGHT_B2902B,
+    TYPE_M81,
+    InstrumentSpec,
+)
+from instruments.b2902b import B2902BLabInstrument, parse_host_port
 from instruments.m81 import M81Instrument
 from instruments.m81_channels import M81Meter, M81SMUMeter, M81Source
 from instruments.matrix7709 import Matrix7709
@@ -162,6 +169,35 @@ class Keithley7709LabInstrument:
 
     def environment(self) -> EnvironmentReader | None:
         return None
+
+
+# ── factory ─────────────────────────────────────────────────────────────────
+
+
+def build_instrument(spec: InstrumentSpec) -> LabInstrument:
+    """Construct a ``LabInstrument`` from its serialized :class:`InstrumentSpec`.
+
+    The file-driven counterpart to wrapping a live facade in the GUI: it maps a
+    declared ``(type, resource, simulated)`` onto the concrete registry entry, so
+    a session loaded from disk resolves *every* instrument it names — M81, 7709
+    or B2902B — through one seam.  Adding an instrument type means adding a branch
+    here and nowhere else.
+    """
+    if spec.type == TYPE_M81:
+        facade = M81Instrument(spec.resource, simulated=spec.simulated)
+        return M81LabInstrument(facade, instrument_id=spec.id)
+    if spec.type == TYPE_KEITHLEY_7709:
+        matrix = Matrix7709(resource=spec.resource, simulated=spec.simulated)
+        return Keithley7709LabInstrument(matrix, instrument_id=spec.id)
+    if spec.type == TYPE_KEYSIGHT_B2902B:
+        host, port = parse_host_port(spec.resource)
+        return B2902BLabInstrument(
+            host, port, simulated=spec.simulated, instrument_id=spec.id
+        )
+    raise ValueError(
+        f"Unknown instrument type {spec.type!r} for {spec.id!r} "
+        f"(known: {sorted((TYPE_M81, TYPE_KEITHLEY_7709, TYPE_KEYSIGHT_B2902B))})"
+    )
 
 
 # ── registry ────────────────────────────────────────────────────────────────

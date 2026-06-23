@@ -38,6 +38,7 @@ SCHEMA_VERSION = 2
 # format; the instruments layer (instruments/registry.py) imports them.
 TYPE_M81 = "lakeshore_m81"
 TYPE_KEITHLEY_7709 = "keithley_7709"
+TYPE_KEYSIGHT_B2902B = "keysight_b2902b"   # external SMU (gate drive + leakage), spec 02
 
 # Default binding for channels that do not name an instrument, and the id of the
 # M81 synthesized when loading a pre-registry (v1) file.
