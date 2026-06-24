@@ -59,16 +59,18 @@ inform the design and contain reusable, already-tested domain logic:
 
 ## Roadmap (build order)
 
-1. **Instrument registry** — current task. Spec: `docs/specs/01-instrument-registry.md`.
-2. Session schema extension for multi-instrument (folded into step 1).
+1. **Instrument registry** — DONE. Spec: `docs/specs/01-instrument-registry.md`.
+2. Session schema extension for multi-instrument — DONE (folded into step 1).
 3. External SMU adapter (gate drive + leakage read), reusing `vdp-measure`'s B2902B SCPI
-   transport. Spec: `docs/specs/02-external-smu-adapter.md`.
+   transport — DONE. Spec: `docs/specs/02-external-smu-adapter.md`.
 4. Executor tree (the sequencer): `Loop` / `Sequence` / `Step`, `PointStep` /
-   `StreamStep`.
+   `StreamStep`. Spec: `docs/specs/03-executor-tree.md`. **Two increments, two separate
+   commits, (a) before (b):** (a) tree skeleton + default-tree synthesis + parity;
+   (b) gate `role` / `routing`, routed-only interlock, sweep loop.
 5. Port from `M81_electr_meas`: environment reader, reciprocity, data-quality checks.
 
-Specs `01` and `02` are written; the rest follow. Begin at the reconnaissance step of
-spec `01`.
+Specs `01`–`03` are written; steps 1–3 are done. Step 4 is next — begin at increment 1
+of spec `03`.
 
 ## How to work here
 
