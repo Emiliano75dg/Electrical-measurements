@@ -30,6 +30,7 @@ from pathlib import Path
 from core.channels import Func, MeterConfig, SourceConfig
 from core.derived import Geometry
 from measurements.routing import MatrixLayout, RouteStep
+from measurements.sequence import NodeSpec, sequence_from_dict, sequence_to_dict
 
 SCHEMA_VERSION = 2
 
@@ -102,11 +103,15 @@ class Session:
     matrix: MatrixSettings = field(default_factory=MatrixSettings)
     layout: MatrixLayout = field(default_factory=MatrixLayout)
     routes: list[RouteStep] = field(default_factory=list)
+    # Optional orchestration tree (spec 03).  None → the runner synthesizes the
+    # default tree from the flat fields at run time, so v2 files (which lack the
+    # key) load and behave exactly as before — additive, no SCHEMA_VERSION bump.
+    sequence: NodeSpec | None = None
 
     # ── serialisation ────────────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "schema_version": SCHEMA_VERSION,
             "connection": asdict(self.connection),
             "instruments": [
@@ -146,6 +151,11 @@ class Session:
                 for r in self.routes
             ],
         }
+        # Optional: only emitted when present, so files without a composed
+        # sequence stay byte-for-byte as before (same precedent as instrument_id).
+        if self.sequence is not None:
+            d["sequence"] = sequence_to_dict(self.sequence)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Session":
@@ -212,6 +222,7 @@ class Session:
             matrix=matrix,
             layout=layout,
             routes=routes,
+            sequence=sequence_from_dict(d.get("sequence")),
         )
 
 

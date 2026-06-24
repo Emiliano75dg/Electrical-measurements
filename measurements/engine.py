@@ -29,7 +29,9 @@ from PySide6.QtCore import QThread, Signal
 
 from core.channels import MeterConfig, MeterChannel, Reading, SourceChannel, SourceConfig
 from core.derived import CrossStepQuantity, DerivedContext, DerivedQuantity, Geometry
+from measurements.executors import RunContext, build_executor
 from measurements.routing import MatrixLayout, RouteStep
+from measurements.sequence import NodeSpec, synthesize_default_sequence
 
 # step label used for the per-cycle combined row (cross-step quantities)
 COMBINED_LABEL = "combined"
@@ -63,6 +65,7 @@ class AcquisitionWorker(QThread):
         layout: MatrixLayout | None = None,
         steps: list[RouteStep] | None = None,
         cross_derived: list[CrossStepQuantity] | None = None,
+        sequence: NodeSpec | None = None,
     ) -> None:
         super().__init__()
         self._sources = sources
@@ -77,6 +80,10 @@ class AcquisitionWorker(QThread):
         self._matrix = matrix
         self._layout = layout
         self._steps = steps                    # None → static single route (no "step" column)
+        # Orchestration tree.  None → synthesized from the flat fields at run()
+        # time (byte-identical to the previous while/for); when present it drives
+        # directly (spec 03, "Default-tree synthesis").
+        self._sequence = sequence
         self._running = False
         self._t0: float | None = None
         self._lock = threading.Lock()
@@ -181,8 +188,6 @@ class AcquisitionWorker(QThread):
 
         try:
             cols = self.columns()
-            steps = self._steps or [RouteStep("static", [])]
-            multi = len(steps) > 1
 
             if self._settle_s > 0:
                 self.status_changed.emit(f"Settling  ({self._settle_s:.1f} s)…")
@@ -201,41 +206,23 @@ class AcquisitionWorker(QThread):
                     fh.flush()
                     self.sample_ready.emit(row)
 
-                while self._running:
-                    cycle: dict[str, dict[str, Reading]] = {}
-                    for step in steps:
-                        if not self._running:
-                            break
-                        loop_start = time.monotonic()
-                        try:
-                            self._route(step)
-                            # re-settle the lock-in after a route change between steps
-                            if multi and self._settle_s > 0:
-                                self.msleep(int(self._settle_s * 1000))
-                                if not self._running:
-                                    break
-                            readings = self._acquire_readings()
-                            cycle[step.label] = readings
-                            _publish(self._build_row(
-                                readings, step.label if self._steps is not None else None
-                            ))
-                        except Exception as exc:
-                            self.error_occurred.emit(f"Read error: {exc}")
-                            self._running = False
-                            break
-
-                        elapsed = time.monotonic() - loop_start
-                        remaining_ms = int((self._interval_s - elapsed) * 1000)
-                        if remaining_ms > 0:
-                            self.msleep(remaining_ms)
-
-                    # one combined row per completed cycle (van der Pauw R_sheet, …)
-                    if self._cross and self._running and cycle:
-                        try:
-                            _publish(self._build_cross_row(cycle))
-                        except Exception as exc:
-                            self.error_occurred.emit(f"Cross-step error: {exc}")
-                            self._running = False
+                # Build (or synthesize) the orchestration tree and walk it.  The
+                # old `while running` is now the root Loop(forever); a read error
+                # propagates out of the tree and is surfaced here, exactly as the
+                # per-step `except` did before.
+                tree = self._sequence or synthesize_default_sequence(
+                    self._steps,
+                    settle_s=self._settle_s,
+                    interval_s=self._interval_s,
+                    current_reversal=self._current_reversal,
+                    has_cross=bool(self._cross),
+                )
+                ctx = self._make_context(_publish)
+                try:
+                    build_executor(tree, ctx).run(ctx)
+                except Exception as exc:
+                    self.error_occurred.emit(f"Read error: {exc}")
+                    self._running = False
 
         finally:
             for s in self._sources:
@@ -249,6 +236,38 @@ class AcquisitionWorker(QThread):
                 except Exception:
                     pass
             self.status_changed.emit("Stopped")
+
+    # ── run context (the seam handed to the executors) ──────────────────────────
+
+    def _make_context(self, publish) -> RunContext:
+        """Bundle the shell's primitives + run-wide data for the executor tree.
+
+        The acquisition primitives stay methods of this worker — the executors
+        invoke them through the context, so the read still happens under the same
+        lock as live reconfiguration (the guarantee is unchanged).
+        """
+        route_by_label = {s.label: s for s in (self._steps or [])}
+
+        def _on_cross_error(exc: Exception) -> None:
+            self.error_occurred.emit(f"Cross-step error: {exc}")
+            self._running = False
+
+        return RunContext(
+            route=self._route,
+            acquire=self._acquire_readings,
+            build_row=self._build_row,
+            build_cross_row=self._build_cross_row,
+            publish=publish,
+            sleep_ms=lambda ms: self.msleep(int(ms)),
+            is_running=lambda: self._running,
+            now=time.monotonic,
+            resolve_route=route_by_label.get,
+            cross=self._cross,
+            has_step_column=self._steps is not None,
+            default_settle_s=self._settle_s,
+            interval_s=self._interval_s,
+            on_cross_error=_on_cross_error,
+        )
 
     # ── matrix routing ────────────────────────────────────────────────────────────
 
@@ -285,15 +304,19 @@ class AcquisitionWorker(QThread):
 
     # ── reading acquisition (with optional DC current reversal) ───────────────────
 
-    def _acquire_readings(self) -> dict[str, Reading]:
+    def _acquire_readings(self, current_reversal: bool | None = None) -> dict[str, Reading]:
         """Read every meter once, or as a +I/−I antisymmetrised pair if reversal is on.
 
         Current reversal (REDESIGN.md §5, §8) rejects current-independent offsets
         (thermal EMF, relay/junction series voltages): measure at +I and −I, then
         keep the odd part (V+ − V−)/2.  It is applied per route step, under the
         same lock as live reconfiguration.
+
+        ``current_reversal`` is now per-step (carried by ``StepSpec``); ``None``
+        falls back to the worker-wide default so ``read_single`` is unchanged.
         """
-        if not self._current_reversal:
+        reversal = self._current_reversal if current_reversal is None else current_reversal
+        if not reversal:
             with self._lock:
                 return {m.id: m.read() for m in self._meters}
 

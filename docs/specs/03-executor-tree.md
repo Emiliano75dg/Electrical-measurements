@@ -153,6 +153,28 @@ matrix layout / routes were added without a bump; older files simply lack the ke
 load with defaults). A bump is only warranted when old data must be *transformed* on load,
 which is not the case here.
 
+### Named migration debt — `interval_s` is plumbed per-step (increment 1)
+
+`LoopSpec.interval_s` is described above as an *inter-iteration* (per-cycle) wait. The
+**current code does not pace that way**: `AcquisitionWorker.run()` pads **each step** to
+`interval_s` (it captures `loop_start` before the route and sleeps the remainder after the
+row is published — the `for step in steps` body), so a multi-step cycle today takes
+≈ `n_steps × interval_s`, not one wait per cycle. For a single-step or static run the two
+are identical; only multi-step (vdP) differs.
+
+To keep increment 1 **byte-identical** (and, in the worst case, to keep the *readings*
+unchanged — a different dwell can shift a lock-in's integration), the pacing stays
+**per-step** in this increment: `LoopExecutor.run` threads its `interval_s` onto the
+`RunContext`, and `StepExecutor` consumes it to pad each step exactly as the old loop did.
+`LoopSpec.interval_s` is serialized as a per-loop field but is *applied* per-step.
+
+**Planned migration:** make `interval_s` a genuine per-iteration wait owned by
+`LoopExecutor` (and add a per-`StepSpec` dwell if a per-step pad is still wanted), once the
+GUI sequence builder exists to author it and the parity baseline no longer pins the
+per-step semantics. This is a named, forward-compatible debt — the same shape as the
+`routing` stored→derived debt in increment 2 — recorded here, not only in the commit
+message. Until then, treat per-loop `interval_s` semantics as not-yet-implemented.
+
 ### Serialization example
 
 ```json

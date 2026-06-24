@@ -22,6 +22,7 @@ from core.session import (
     save_session,
 )
 from measurements.routing import MatrixLayout, RouteStep
+from measurements.sequence import LoopSpec, SequenceSpec, StepSpec
 
 
 def _full_session() -> Session:
@@ -101,6 +102,40 @@ def test_from_dict_tolerates_missing_matrix_keys():
 def test_from_dict_empty_uses_defaults():
     s = Session.from_dict({})
     assert s == Session()
+
+
+# ── sequence tree (spec 03): additive, no schema bump ─────────────────────────
+
+def test_sequence_defaults_to_none_and_is_omitted_from_json():
+    s = _full_session()
+    assert s.sequence is None
+    assert "sequence" not in s.to_dict()          # absent key, byte-identical to before
+
+
+def test_explicit_sequence_round_trips():
+    s = _full_session()
+    s.sequence = LoopSpec(
+        kind="forever",
+        child=SequenceSpec(
+            cross_derived=True,
+            children=[StepSpec(route="s1", current_reversal=True, settle_s=2.5)],
+        ),
+    )
+    restored = Session.from_dict(s.to_dict())
+    assert restored == s
+    assert restored.sequence == s.sequence
+
+
+def test_v2_file_without_sequence_loads_with_none():
+    # a v2 file written before the tree existed: no "sequence" key -> None
+    legacy = {
+        "schema_version": 2,
+        "connection": {"ip_address": "1.2.3.4", "simulated": True},
+        "instruments": [],
+        "sources": [{"port": 1, "config": {"func": "I_AC", "amplitude": 1e-6}}],
+        "meters": [{"port": 1, "meter_id": "V", "config": {"lockin": True}}],
+    }
+    assert Session.from_dict(legacy).sequence is None
 
 
 # ── v2 instrument registry: round-trip and v1 migration ──────────────────────
