@@ -59,6 +59,10 @@ class RunContext:
     default_settle_s: float
     interval_s: float
     on_cross_error: Callable[[Exception], None] | None = None
+    # increment 2: set the swept source's amplitude, resolved by role, under the
+    # shell's lock.  None on the non-sweep paths; the engine stays agnostic (it
+    # gets a callable, not a notion of "gate" or "role").
+    sweep_axis: Callable[[str, float], None] | None = None
 
 
 class StepExecutor:
@@ -140,7 +144,16 @@ class LoopExecutor:
                     break
                 self.child.run(ctx)
         elif self.spec.kind == "sweep":
-            raise NotImplementedError("sweep loop arrives in increment 2")
+            if ctx.sweep_axis is None:
+                raise RuntimeError("sweep loop needs a sweep_axis resolver in the context")
+            # Sweep names its axis by *role*, not id: the sequence speaks of
+            # function ("sweep the gate"), not wiring.  Each value reconfigures the
+            # resolved source (under the shell's lock) before running the child.
+            for value in (self.spec.values or []):
+                if not ctx.is_running():
+                    break
+                ctx.sweep_axis(self.spec.axis, value)
+                self.child.run(ctx)
         else:
             raise ValueError(f"unknown loop kind: {self.spec.kind!r}")
         return None

@@ -16,11 +16,34 @@ from __future__ import annotations
 from collections import Counter
 
 from core.channels import Func
-from core.session import Session
+from core.session import Session, SourceSpec
+from measurements.sequence import LoopSpec, NodeSpec, SequenceSpec
 
 
 def _source_ids(session: Session) -> set[str]:
     return {f"S{s.port}" for s in session.sources}
+
+
+def resolve_source_by_role(session: Session, role: str) -> list[SourceSpec]:
+    """Sources whose ``role`` matches, resolved tolerantly (like a meter reference).
+
+    The sweep names its axis by role, not id; this is the lookup behind the
+    "exactly one match" rule enforced in validate_configuration().
+    """
+    return [s for s in session.sources if s.role == role]
+
+
+def _sweep_axes(node: NodeSpec | None) -> list[str]:
+    """Every ``axis`` named by a sweep loop anywhere in the sequence tree."""
+    if isinstance(node, LoopSpec):
+        here = [node.axis] if (node.kind == "sweep" and node.axis is not None) else []
+        return here + _sweep_axes(node.child)
+    if isinstance(node, SequenceSpec):
+        axes: list[str] = []
+        for child in node.children:
+            axes += _sweep_axes(child)
+        return axes
+    return []
 
 
 def validate_configuration(session: Session) -> list[str]:
@@ -91,5 +114,13 @@ def validate_configuration(session: Session) -> list[str]:
                 errors.append(f"Route step '{step.label}': {msg}")
         if session.matrix.vdp_sheet and len(session.routes) < 2:
             errors.append("van der Pauw R_sheet needs at least two route steps.")
+
+    # ── sweep axis must resolve to exactly one source by role ─────────────────
+    for axis in _sweep_axes(session.sequence):
+        n = len(resolve_source_by_role(session, axis))
+        if n == 0:
+            errors.append(f"Sweep axis '{axis}' matches no source role.")
+        elif n > 1:
+            errors.append(f"Sweep axis '{axis}' matches {n} sources; the role must be unique.")
 
     return errors

@@ -66,6 +66,8 @@ class AcquisitionWorker(QThread):
         steps: list[RouteStep] | None = None,
         cross_derived: list[CrossStepQuantity] | None = None,
         sequence: NodeSpec | None = None,
+        fixed_source_ids: set[str] | None = None,
+        source_roles: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._sources = sources
@@ -84,6 +86,15 @@ class AcquisitionWorker(QThread):
         # time (byte-identical to the previous while/for); when present it drives
         # directly (spec 03, "Default-tree synthesis").
         self._sequence = sequence
+        # Routed-only interlock (spec 03, increment 2): channel ids of sources NOT
+        # routed through the matrix (FIXED).  _route never cycles these — neither
+        # disables nor re-enables them (no yo-yo).  Empty (the default) → every
+        # source is cycled → identical to step 3.  The engine stays agnostic: it
+        # holds opaque ids, not a notion of gate/role/terminal.
+        self._fixed_source_ids = fixed_source_ids or set()
+        # Sweep resolution: channel id → role string, used to set the swept
+        # source's amplitude by role at run time.
+        self._source_roles = source_roles or {}
         self._running = False
         self._t0: float | None = None
         self._lock = threading.Lock()
@@ -267,7 +278,26 @@ class AcquisitionWorker(QThread):
             default_settle_s=self._settle_s,
             interval_s=self._interval_s,
             on_cross_error=_on_cross_error,
+            sweep_axis=self._set_sweep_axis,
         )
+
+    def _set_sweep_axis(self, axis: str, value: float) -> None:
+        """Set the amplitude of the source bound to ``axis`` (by role), under the lock.
+
+        Resolved by role, not id, so the sequence speaks of function ("sweep the
+        gate") and not wiring.  Reconfiguration happens under the same lock as the
+        reads and live edits (the increment-1 guarantee).  ``validate_configuration``
+        rejects 0 or >1 role matches before the run; this stays defensive.
+        """
+        matches = [s for s in self._sources if self._source_roles.get(s.id) == axis]
+        if len(matches) != 1:
+            raise ValueError(
+                f"sweep axis '{axis}' resolves to {len(matches)} sources (need exactly one)"
+            )
+        src = matches[0]
+        with self._lock:
+            src.configure(replace(src.config, amplitude=value))
+            src.enable()
 
     # ── matrix routing ────────────────────────────────────────────────────────────
 
@@ -276,24 +306,27 @@ class AcquisitionWorker(QThread):
             return
         channels = step.channels(self._layout)
         # Safety interlock (CLAUDE.md invariant 5): relays never move with sources
-        # live.  Disable every source *before* open_all, switch, then re-enable
-        # once the new step's relays are closed.  Instrument-agnostic — the engine
-        # only knows the SourceChannel Protocol, not what an SMU is, so a failed
-        # disable propagates and aborts the run before any relay moves.
+        # live.  Disable the routed sources *before* open_all, switch, then
+        # re-enable once the new step's relays are closed.  Instrument-agnostic —
+        # the engine only knows the SourceChannel Protocol, not what an SMU is, so
+        # a failed disable propagates and aborts the run before any relay moves.
         #
-        # ASSUMPTION: every source in self._sources is routed through the matrix,
-        # so disabling all of them before switching is correct.  REVISIT at the
-        # executor-tree (step 4): a directly-wired / non-routed source (e.g. a gate
-        # that does not pass through the 7709) must NOT be cycled here — no relay
-        # moves on its path, and zeroing it each step would change the sample state
-        # between measurements (gate yo-yo).  The failure mode of this deferral is
-        # functional, not a safety violation: over-disabling is always safe.
+        # Routed-only interlock (spec 03, increment 2): a source in
+        # self._fixed_source_ids is wired *outside* the matrix (e.g. a gate that
+        # does not pass through the 7709).  No relay moves on its path, so it is
+        # left completely untouched here — neither disabled nor re-enabled — to
+        # avoid changing the sample state between measurements (the gate yo-yo:
+        # a re-enable could re-assert the setpoint just as a disable could zero it).
+        # Empty set → every source is cycled → identical to step 3 (over-disabling
+        # is always safe).
         for s in self._sources:
-            s.disable()
+            if s.id not in self._fixed_source_ids:
+                s.disable()
         self._matrix.open_all()
         self._matrix.close(channels)
         for s in self._sources:
-            s.enable()
+            if s.id not in self._fixed_source_ids:
+                s.enable()
         # Settle after re-enable: let the new path (relays + re-driven sources)
         # stabilise — same mechanism as the initial settle.
         settle = getattr(self._matrix, "settle_s", 0.0)

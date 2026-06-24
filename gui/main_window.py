@@ -44,8 +44,10 @@ from core.session import (
     MeterSpec,
     Session,
     SourceSpec,
+    fixed_source_ids,
     load_session,
     save_session,
+    source_role_map,
     synthesize_default_instruments,
 )
 from core.channels import MeterChannel, SourceChannel
@@ -305,7 +307,8 @@ class MainWindow(QMainWindow):
 
     def _make_worker(self, save_path: Path) -> AcquisitionWorker | None:
         # single domain-level gate: clear messages instead of cryptic runtime errors
-        errors = validate_configuration(self._capture_session())
+        session = self._capture_session()
+        errors = validate_configuration(session)
         if errors:
             QMessageBox.warning(
                 self, "Invalid configuration", "\n".join(f"•  {e}" for e in errors)
@@ -336,6 +339,12 @@ class MainWindow(QMainWindow):
             layout=layout if matrix is not None else None,
             steps=steps if matrix is not None else None,
             cross_derived=cross,
+            sequence=session.sequence,
+            # Routed-only interlock + sweep resolution (spec 03, increment 2),
+            # keyed by channel id.  The GUI does not author role/routing yet
+            # (file-driven only), so today these are empty → identical to step 3.
+            fixed_source_ids=fixed_source_ids(sources, session.sources),
+            source_roles=source_role_map(sources, session.sources),
         )
 
     # ── start / stop ──────────────────────────────────────────────────────────────

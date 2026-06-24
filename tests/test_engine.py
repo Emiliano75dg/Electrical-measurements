@@ -15,7 +15,7 @@ pytest.importorskip("PySide6")
 from core.channels import Func, MeterConfig, Reading, SourceConfig
 from core.derived import resistance, vanderpauw_sheet
 from measurements.engine import COMBINED_LABEL, AcquisitionWorker
-from measurements.routing import RouteStep
+from measurements.routing import MatrixLayout, RouteStep
 
 
 class FakeSource:
@@ -155,3 +155,77 @@ def test_read_single_cross_step_combined_row():
     row = w.read_single()
     assert row["step"] == COMBINED_LABEL
     assert row["R_sheet"] == pytest.approx(math.pi * 120.0 / math.log(2.0), rel=1e-9)
+
+
+# ── routed-only interlock (spec 03, increment 2) ──────────────────────────────
+
+class RecordingSource:
+    """Counts disable()/enable() so the interlock can be observed per step."""
+
+    def __init__(self, sid, config=None):
+        self.id = sid
+        self.config = config or SourceConfig(amplitude=1e-3)
+        self.disabled = 0
+        self.enabled = 0
+
+    def configure(self, cfg): self.config = cfg
+    def enable(self): self.enabled += 1
+    def disable(self): self.disabled += 1
+
+
+class FakeMatrix:
+    settle_s = 0.0
+    def __init__(self): self.opened = 0
+    def open_all(self): self.opened += 1
+    def close(self, channels): pass
+
+
+def test_route_leaves_fixed_source_totally_untouched_across_steps():
+    # A gate driven by the external SMU (id "SMU2") wired outside the matrix:
+    # across two route steps it must be neither disabled NOR re-enabled (no yo-yo),
+    # while the routed M81 source (id "S1") is cycled each step.
+    routed = RecordingSource("S1")
+    gate = RecordingSource("SMU2")          # external-SMU style id, FIXED
+    m = FakeMeter(routed, 100.0, mid="V")
+    w = _worker([routed, gate], [m], matrix=FakeMatrix(), layout=MatrixLayout(),
+                steps=[RouteStep("a", []), RouteStep("b", [])],
+                fixed_source_ids={"SMU2"})
+
+    w._route(RouteStep("a", []))
+    w._route(RouteStep("b", []))
+
+    assert (routed.disabled, routed.enabled) == (2, 2)   # cycled every step
+    assert (gate.disabled, gate.enabled) == (0, 0)       # never touched: no yo-yo
+
+
+def test_route_cycles_all_sources_by_default_identical_to_step3():
+    # Empty fixed set (the default) -> every source disabled+re-enabled, exactly
+    # the step-3 interlock.
+    a = RecordingSource("S1")
+    b = RecordingSource("S2")
+    w = _worker([a, b], [FakeMeter(a, 100.0, mid="V")],
+                matrix=FakeMatrix(), layout=MatrixLayout(), steps=[RouteStep("a", [])])
+
+    w._route(RouteStep("a", []))
+
+    assert (a.disabled, a.enabled) == (1, 1)
+    assert (b.disabled, b.enabled) == (1, 1)
+
+
+# ── sweep by role (spec 03, increment 2) ──────────────────────────────────────
+
+def test_set_sweep_axis_sets_amplitude_by_role():
+    gate = RecordingSource("SMU1")
+    w = _worker([gate], [FakeMeter(gate, 100.0, mid="V")], source_roles={"SMU1": "gate"})
+
+    w._set_sweep_axis("gate", -7.5)
+
+    assert gate.config.amplitude == -7.5
+    assert gate.enabled >= 1                 # re-enabled with the new setpoint
+
+
+def test_set_sweep_axis_rejects_unresolved_role():
+    gate = RecordingSource("SMU1")
+    w = _worker([gate], [FakeMeter(gate, 100.0, mid="V")], source_roles={"SMU1": "gate"})
+    with pytest.raises(ValueError):
+        w._set_sweep_axis("nonexistent", 1.0)

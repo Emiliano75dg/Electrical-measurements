@@ -116,3 +116,17 @@ def test_synthesized_tree_roundtrips():
         settle_s=1.0, interval_s=0.5, current_reversal=True, has_cross=True,
     )
     assert sequence_from_dict(sequence_to_dict(loop)) == loop
+
+
+def test_sweep_loop_round_trips():
+    tree = LoopSpec(
+        kind="sweep", axis="gate", values=[-40.0, 0.0, 40.0],
+        child=LoopSpec(
+            kind="forever",
+            child=SequenceSpec(children=[StepSpec(route="Rxx"), StepSpec(route="Rxy")]),
+        ),
+    )
+    restored = sequence_from_dict(sequence_to_dict(tree))
+    assert restored == tree
+    assert restored.kind == "sweep" and restored.axis == "gate"
+    assert restored.values == [-40.0, 0.0, 40.0]

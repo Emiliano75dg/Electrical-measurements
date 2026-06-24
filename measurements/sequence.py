@@ -49,12 +49,14 @@ class LoopSpec:
     """Repeat a child: forever, a fixed count, or (increment 2) a sweep."""
 
     child: "NodeSpec" = None  # type: ignore[assignment]
-    kind: str = "forever"            # "forever" | "count" | "sweep"  (sweep -> increment 2)
+    kind: str = "forever"            # "forever" | "count" | "sweep"
     count: int | None = None          # for kind == "count"
     # interval_s: see the migration debt below.  In increment 1 this is plumbed
     # *per-step* (consumed by StepExecutor) for byte-identical parity with the
     # current per-step pacing — NOT a per-loop inter-iteration wait yet.
     interval_s: float = 0.0
+    axis: str | None = None           # for kind == "sweep": the source *role* to sweep
+    values: list[float] | None = None  # for kind == "sweep": amplitudes applied per iteration
 
 
 NodeSpec = Union[StepSpec, SequenceSpec, LoopSpec]
@@ -97,6 +99,10 @@ def sequence_to_dict(node: NodeSpec | None) -> dict | None:
         }
         if node.count is not None:
             d["count"] = node.count
+        if node.axis is not None:
+            d["axis"] = node.axis
+        if node.values is not None:
+            d["values"] = list(node.values)
         return d
     raise TypeError(f"not a sequence node: {node!r}")
 
@@ -124,6 +130,8 @@ def sequence_from_dict(d: dict | None) -> NodeSpec | None:
             kind=d.get("kind", "forever"),
             count=d.get("count"),
             interval_s=d.get("interval_s", 0.0),
+            axis=d.get("axis"),
+            values=d.get("values"),
         )
     raise ValueError(f"unknown sequence node type: {t!r}")
 

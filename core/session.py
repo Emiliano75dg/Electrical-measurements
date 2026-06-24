@@ -29,7 +29,7 @@ from pathlib import Path
 
 from core.channels import Func, MeterConfig, SourceConfig
 from core.derived import Geometry
-from measurements.routing import MatrixLayout, RouteStep
+from measurements.routing import MatrixLayout, RouteStep, TermMode
 from measurements.sequence import NodeSpec, sequence_from_dict, sequence_to_dict
 
 SCHEMA_VERSION = 2
@@ -77,6 +77,13 @@ class SourceSpec:
     port: int
     config: SourceConfig
     instrument_id: str | None = None   # None -> the default (synthesized) M81
+    # Structural metadata (spec 03, increment 2) — sits with instrument_id, NOT in
+    # the electrical SourceConfig.  ``role`` names the source's function for the
+    # sweep ("gate", "excitation", …); ``routing`` says whether it passes through
+    # the matrix (ROUTED, today's default) or is wired outside it (FIXED).  See the
+    # stored→derived migration debt in spec 03 for ``routing``.
+    role: str | None = None
+    routing: TermMode = TermMode.ROUTED
 
 
 @dataclass
@@ -122,13 +129,7 @@ class Session:
                 }
                 for inst in self.instruments
             ],
-            "sources": [
-                _with_instrument_id(
-                    {"port": s.port, "config": _source_cfg_to_dict(s.config)},
-                    s.instrument_id,
-                )
-                for s in self.sources
-            ],
+            "sources": [_source_to_dict(s) for s in self.sources],
             "meters": [
                 _with_instrument_id(
                     {"port": m.port, "meter_id": m.meter_id, "config": asdict(m.config)},
@@ -169,6 +170,8 @@ class Session:
                 port=int(s["port"]),
                 config=_source_cfg_from_dict(s.get("config", {})),
                 instrument_id=s.get("instrument_id"),
+                role=s.get("role"),
+                routing=TermMode(s.get("routing", TermMode.ROUTED.value)),
             )
             for s in d.get("sources", [])
         ]
@@ -228,6 +231,22 @@ class Session:
 
 # ── registry (de)serialisation helpers ───────────────────────────────────────
 
+def _source_to_dict(s: "SourceSpec") -> dict:
+    """Serialise a SourceSpec, emitting role/routing only when non-default.
+
+    Default-bound sources (no instrument_id, no role, ROUTED) serialise exactly as
+    before — byte-for-byte — so v2 files without these keys are unchanged.
+    """
+    d = {"port": s.port, "config": _source_cfg_to_dict(s.config)}
+    if s.instrument_id is not None:
+        d["instrument_id"] = s.instrument_id
+    if s.role is not None:
+        d["role"] = s.role
+    if s.routing is not TermMode.ROUTED:
+        d["routing"] = s.routing.value          # the stable string ("fixed"), not the name
+    return d
+
+
 def _with_instrument_id(d: dict, instrument_id: str | None) -> dict:
     """Add ``instrument_id`` to a channel dict only when it is bound explicitly.
 
@@ -270,6 +289,23 @@ def _instruments_from_dict(
     if not d:
         return []
     return synthesize_default_instruments(connection, matrix)
+
+
+def fixed_source_ids(channels, specs: list["SourceSpec"]) -> set[str]:
+    """Channel ids of the FIXED (non-routed) sources, for the routed-only interlock.
+
+    Keyed by the *channel* id, not ``S{port}``: the id depends on the instrument
+    (``S{port}`` for the M81, ``SMU{port}`` for an external SMU gate), so it is read
+    off the built channel — pairing each channel with its SourceSpec positionally
+    (they are built from the same ordered source list).  Using ``S{port}`` here
+    would mismatch an SMU gate's id and silently fail to keep it enabled.
+    """
+    return {ch.id for ch, spec in zip(channels, specs) if spec.routing is TermMode.FIXED}
+
+
+def source_role_map(channels, specs: list["SourceSpec"]) -> dict[str, str]:
+    """Map of channel id → role for sources that declare one (for sweep resolution)."""
+    return {ch.id: spec.role for ch, spec in zip(channels, specs) if spec.role is not None}
 
 
 def synthesize_default_instruments(

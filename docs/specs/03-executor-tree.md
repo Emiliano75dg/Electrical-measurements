@@ -278,7 +278,7 @@ like `MeterConfig.reference`, with the 0/>1-match check added to
 ```json
 "sources": [
   { "port": 1, "role": "excitation", "config": { "func": "I_AC", "amplitude": 1e-05 } },
-  { "port": 1, "role": "gate", "routing": "FIXED",
+  { "port": 1, "role": "gate", "routing": "fixed",
     "instrument_id": "gate_smu", "config": { "func": "V_DC" } }
 ],
 "sequence": {

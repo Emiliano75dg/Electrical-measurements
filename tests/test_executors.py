@@ -125,10 +125,28 @@ def test_count_loop_runs_exactly_n():
     assert len(calls) == 4
 
 
-def test_sweep_loop_is_increment_2():
+def test_sweep_loop_sets_axis_per_value_then_runs_child():
+    applied: list[tuple[str, float]] = []
+    runs: list[int] = []
     ctx = _fake_ctx([])
-    with pytest.raises(NotImplementedError):
-        LoopExecutor(LoopSpec(child=StepSpec(), kind="sweep"), object()).run(ctx)
+    ctx.sweep_axis = lambda axis, value: applied.append((axis, value))
+
+    class Counter:
+        def run(self, ctx): runs.append(1); return {}
+
+    spec = LoopSpec(child=StepSpec(), kind="sweep", axis="gate", values=[-40.0, 0.0, 40.0])
+    LoopExecutor(spec, Counter()).run(ctx)
+
+    # axis set (by role) before each child run, once per value, in order
+    assert applied == [("gate", -40.0), ("gate", 0.0), ("gate", 40.0)]
+    assert len(runs) == 3
+
+
+def test_sweep_without_resolver_raises():
+    ctx = _fake_ctx([])           # _fake_ctx leaves sweep_axis = None
+    with pytest.raises(RuntimeError):
+        LoopExecutor(LoopSpec(child=StepSpec(), kind="sweep", axis="gate", values=[1.0]),
+                     object()).run(ctx)
 
 
 # ── cross-step emission ───────────────────────────────────────────────────────

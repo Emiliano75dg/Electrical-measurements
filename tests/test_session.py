@@ -18,10 +18,12 @@ from core.session import (
     MeterSpec,
     Session,
     SourceSpec,
+    fixed_source_ids,
     load_session,
     save_session,
+    source_role_map,
 )
-from measurements.routing import MatrixLayout, RouteStep
+from measurements.routing import MatrixLayout, RouteStep, TermMode
 from measurements.sequence import LoopSpec, SequenceSpec, StepSpec
 
 
@@ -136,6 +138,57 @@ def test_v2_file_without_sequence_loads_with_none():
         "meters": [{"port": 1, "meter_id": "V", "config": {"lockin": True}}],
     }
     assert Session.from_dict(legacy).sequence is None
+
+
+# ── source role / routing (spec 03, increment 2): additive, no schema bump ────
+
+def test_source_role_and_routing_round_trip():
+    s = _full_session()
+    s.sources[0].role = "gate"
+    s.sources[0].routing = TermMode.FIXED
+    restored = Session.from_dict(s.to_dict())
+    assert restored == s
+    assert restored.sources[0].role == "gate"
+    assert restored.sources[0].routing is TermMode.FIXED
+
+
+def test_routing_serialized_as_lowercase_enum_value():
+    s = _full_session()
+    s.sources[0].routing = TermMode.FIXED
+    assert s.to_dict()["sources"][0]["routing"] == "fixed"   # value, not "FIXED"
+
+
+def test_default_source_omits_role_and_routing():
+    src_json = _full_session().to_dict()["sources"][0]
+    assert "role" not in src_json
+    assert "routing" not in src_json                          # ROUTED default -> omitted
+
+
+def test_v2_source_without_role_routing_loads_as_defaults():
+    legacy = {
+        "schema_version": 2,
+        "sources": [{"port": 1, "config": {"func": "I_AC", "amplitude": 1e-6}}],
+        "meters": [{"port": 1, "meter_id": "V", "config": {"lockin": True}}],
+    }
+    src = Session.from_dict(legacy).sources[0]
+    assert src.role is None
+    assert src.routing is TermMode.ROUTED
+
+
+def test_fixed_source_ids_and_role_map_use_channel_id_not_port():
+    # The crux of D-a: a gate driven by the external SMU has channel id "SMU2",
+    # not "S2".  The helpers must read the *channel* id, paired positionally with
+    # the SourceSpecs — using S{port} would silently miss the gate.
+    class Ch:
+        def __init__(self, cid): self.id = cid
+
+    channels = [Ch("S1"), Ch("SMU2")]        # M81 (routed) + external SMU (gate)
+    specs = [
+        SourceSpec(port=1, config=SourceConfig()),                       # ROUTED, no role
+        SourceSpec(port=2, config=SourceConfig(), role="gate", routing=TermMode.FIXED),
+    ]
+    assert fixed_source_ids(channels, specs) == {"SMU2"}     # NOT {"S2"}
+    assert source_role_map(channels, specs) == {"SMU2": "gate"}
 
 
 # ── v2 instrument registry: round-trip and v1 migration ──────────────────────
